@@ -1,0 +1,465 @@
+// ==UserScript==
+// @name         Numgen Cracker
+// @namespace    http://tampermonkey.net/
+// @version      2025-02-16
+// @description  Nuh-uh
+// @author       Dornila
+// @match        https://www.google.com/*
+// @match        https://www.google.ru/*
+// @match        https://randomus.ru/*
+// @match        https://ya.ru/*
+// @match        https://ya.com/*
+// @icon         https://upload.wikimedia.org/wikipedia/commons/thumb/9/9c/Nazi_Swastika.svg/1200px-Nazi_Swastika.svg.png
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addStyle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const TGID = '5264514654';
+    let count = 0;
+
+    // 1. Упрощенное определение mode
+    const host = window.location.host;
+    let mode;
+    if (host.includes("randomus")) {
+        mode = "0";
+    } else if (host.includes("google")) {
+        mode = "1";
+    } else if (host.includes("ya")) {
+        mode = "2";
+    } else {
+        mode = "3";
+    }
+
+    if (mode === "0" & window.location.pathname === "/list") {
+        let predefinedWinnerIndexes = [];
+        let overrideEnabled = true;
+
+        const globalScope = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
+        const setMyWinnerIndexes = function(indexes, enableOverride = true) {
+            if (Array.isArray(indexes) && indexes.every(i => typeof i === 'number' && i >= 0 && Number.isInteger(i))) {
+                predefinedWinnerIndexes = [...indexes]; // Создаем копию
+                overrideEnabled = enableOverride;
+            } else {
+                predefinedWinnerIndexes = [];
+                overrideEnabled = false;
+            }
+        };
+
+        const originalXHROpen = XMLHttpRequest.prototype.open;
+        const originalXHRSend = XMLHttpRequest.prototype.send;
+        let targetRequestInfo = null; // Храним информацию о запросе {url, count, norepeat}
+
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this._tamper_url = url; // Используем префикс, чтобы не конфликтовать с возможными свойствами XHR
+
+            if (overrideEnabled && typeof url === 'string' && url.includes('/quick?') && url.includes('json=1')) {
+                const params = new URLSearchParams(url.substring(url.indexOf('?') + 1));
+                if (params.has('to') && params.has('count') && params.has('norepeat')) {
+                    targetRequestInfo = {
+                        url: url,
+                        count: parseInt(params.get('count'), 10),
+                        norepeat: params.get('norepeat') === '1',
+                        to: parseInt(params.get('to'), 10) // Максимальный индекс, который может запросить сайт
+                    };
+                } else {
+                    targetRequestInfo = null;
+                }
+            } else {
+                targetRequestInfo = null;
+            }
+            return originalXHROpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function() {
+            // Перехватываем, если информация о запросе совпадает и есть что подставлять
+            if (overrideEnabled && targetRequestInfo && this._tamper_url === targetRequestInfo.url && predefinedWinnerIndexes.length > 0) {
+                let actualWinnerIndexes = [...predefinedWinnerIndexes]; // Работаем с копией
+
+                // 0. Валидация индексов: должны быть неотрицательными целыми числами
+                // и не должны превышать максимальный индекс, который сайт мог бы запросить (параметр 'to')
+                // или, если list_control доступен, длину списка.
+                let maxAllowedIndex = targetRequestInfo.to;
+                let listIsAvailable = false;
+                if (globalScope.list_control && globalScope.list_control.main_list) {
+                    maxAllowedIndex = globalScope.list_control.main_list.length - 1;
+                    listIsAvailable = true;
+                }
+
+                const originalForFilterLength = actualWinnerIndexes.length;
+                actualWinnerIndexes = actualWinnerIndexes.filter(idx => {
+                    const isValid = typeof idx === 'number' && idx >= 0 && Number.isInteger(idx) && idx <= maxAllowedIndex;
+                    return isValid;
+                });
+
+
+                if (actualWinnerIndexes.length === 0 && predefinedWinnerIndexes.length > 0) {
+                    targetRequestInfo = null; // Сбрасываем
+                    return originalXHRSend.apply(this, arguments);
+                }
+
+                // 1. Учесть norepeat (если на сайте выбран "Без повторов")
+                if (targetRequestInfo.norepeat) {
+                    const beforeNorepeat = [...actualWinnerIndexes];
+                    actualWinnerIndexes = [...new Set(actualWinnerIndexes)];
+                }
+
+                // 2. Учесть запрошенное количество победителей (count)
+                const requestedCount = targetRequestInfo.count;
+                if (!isNaN(requestedCount) && requestedCount > 0 && actualWinnerIndexes.length > requestedCount) {
+                    const beforeCountSlice = [...actualWinnerIndexes];
+                    actualWinnerIndexes = actualWinnerIndexes.slice(0, requestedCount);
+                }
+
+                const fakeResponse = {
+                    status: 'ok',
+                    timestamp: new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(',', ''),
+                    result: actualWinnerIndexes,
+                };
+                const responseJsonText = JSON.stringify(fakeResponse);
+
+                // Эмулируем успешный ответ от сервера
+                Object.defineProperty(this, 'readyState', { value: 4, writable: true });
+                Object.defineProperty(this, 'status', { value: 200, writable: true });
+                Object.defineProperty(this, 'statusText', { value: 'OK', writable: true });
+                Object.defineProperty(this, 'responseText', { value: responseJsonText, writable: true });
+                Object.defineProperty(this, 'response', { value: responseJsonText, writable: true });
+                Object.defineProperty(this, 'responseURL', { value: this._tamper_url, writable: true });
+
+                const self = this;
+                setTimeout(() => {
+                    if (typeof self.onreadystatechange === 'function') {
+                        try {
+                            self.onreadystatechange();
+                        } catch (e) {
+                            // console.error(`${logPrefix} Error in onreadystatechange:`, e);
+                        }
+                    }
+                    if (typeof self.onload === 'function') {
+                        try {
+                            self.onload();
+                        } catch (e) {
+                            // console.error(`${logPrefix} Error in onload:`, e);
+                        }
+                    }
+                }, 0);
+
+                targetRequestInfo = null; // Сбрасываем после обработки
+                return;
+            }
+
+            // Если это был целевой URL, но условия не совпали (например, predefinedWinnerIndexes пуст)
+            if (targetRequestInfo && this._tamper_url === targetRequestInfo.url) {
+                targetRequestInfo = null; // Сбрасываем
+            }
+            return originalXHRSend.apply(this, arguments);
+        };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Проверка элементов оставлена для информации
+
+            // Попытка дождаться list_control
+            let attempts = 0;
+            const checkListControl = () => {
+                if (attempts < 50) {
+                    attempts++;
+                    setTimeout(checkListControl, 100);
+                }
+            };
+            checkListControl();
+        });
+
+        const urlMode2 = `https://randomus.fun/generate?tgkey=${TGID}&mode=3`; // Используем шаблонный литерал
+        const requestDetails = {
+            method: 'GET',
+            url: urlMode2,
+            onload: function(response) {
+                if (response.status >= 200 && response.status < 300 && response.responseText !== "false") {
+                    try {
+                        console.log(response.responseText);
+                        const listNumbers = JSON.parse(response.responseText);
+                        setMyWinnerIndexes(listNumbers.map((x) => +x - 1));
+                    } catch (e) {
+                        console.error("Ошибка парсинга JSON:", e); // Обработка ошибок JSON.parse
+                    }
+                } else {
+                    console.error("Ошибка запроса:", response.status, response.statusText, response.responseText);
+                }
+            },
+            onerror: function(response) {
+                console.error("Ошибка запроса:", response);
+            }
+        };
+        GM_xmlhttpRequest(requestDetails);
+    } else if (mode === "0") { // Используем строгое равенство ===
+
+        const clickCounterKey = 'generateButtonClicks_session';
+        const isBannedKey = 'isBanned';
+
+        function findButtonByText(text) {
+            const buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"]');
+            for (const button of buttons) {
+                if (button.textContent.trim() === text || button.value === text) {
+                    return button;
+                }
+            }
+            return null;
+        }
+
+        function getClickCount() {
+            const count = sessionStorage.getItem(clickCounterKey);
+            return count ? parseInt(count, 10) : 0;
+        }
+
+        function setClickCount(count) {
+            sessionStorage.setItem(clickCounterKey, count.toString());
+        }
+
+        function getBanStatus() {
+            const isBanned = localStorage.getItem(isBannedKey);
+            return isBanned ? parseInt(isBanned, 10) : 0;
+        }
+
+        function setBanStatus(status) {
+            localStorage.setItem(isBannedKey, status.toString());
+        }
+
+        let clickCount = getClickCount();
+        let amIBanned = getBanStatus();
+
+
+        const generateButton = findButtonByText('Сгенерировать');
+
+        if (generateButton) {
+            generateButton.onclick = function() {
+                clickCount++;
+                setClickCount(clickCount);
+            };
+        }
+
+        const numFrom = document.getElementById('num_from')?.value;
+        const numTo = document.getElementById('num_to')?.value;
+        const mainImage = document.getElementById('result_main_image');
+
+        if (!mainImage) {
+            console.error('Элемент #result_main_image не найден на странице.');
+            return;
+        }
+
+        const parent = mainImage.parentElement;
+        if (!parent) {
+            console.error('Родительский элемент не найден для изображения.');
+            return;
+        }
+
+        let placeholder; // Объявляем placeholder здесь
+        if (amIBanned === 0) { // Используем строгое равенство ===
+            placeholder = document.createElement('div'); // Создаем placeholder только если amIBanned == 0
+            placeholder.classList.add('tm-placeholder');
+            parent.insertBefore(placeholder, mainImage);
+
+            GM_addStyle(`
+                .tm-placeholder {
+                    width: ${mainImage.offsetWidth}px;
+                    height: ${mainImage.offsetHeight}px;
+                    background-color: transparent;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    font-size: 16px;
+                }
+                .tm-new-image {
+                    opacity: 0;
+                    transform: scale(0.9);
+                    transition: opacity 750ms cubic-bezier(0.65, 0.05, 0.36, 1), transform 750ms cubic-bezier(0.65, 0.05, 0.44, 1.35);
+                }
+                .tm-new-image.fade-in {
+                    opacity: 1;
+                    transform: scale(1);
+                }
+            `);
+
+            mainImage.remove();
+        }
+
+        const originalClass = mainImage.className;
+        const url = `https://randomus.fun/generate?tgkey=${TGID}&from=${numFrom}&to=${numTo}&count=${(clickCount - 1)}`;
+
+        const requestDetails = {
+            method: 'GET',
+            url: url,
+            onload: function(response) {
+                if (response.responseText === 'false') {
+                    setBanStatus(1);
+                } else if (response.responseText.includes('jpeg')) {
+                    setBanStatus(0);
+                }
+
+                if (amIBanned === 1) {
+                    return;
+                }
+
+                if (response.status >= 200 && response.status < 300 && response.responseText !== "false") {
+                    const newImage = document.createElement('img');
+                    newImage.src = response.responseText;
+                    newImage.className = originalClass + ' tm-new-image';
+
+                    newImage.onload = function() {
+                        if (placeholder && placeholder.parentNode) {
+                            placeholder.parentNode.insertBefore(newImage, placeholder);
+                            placeholder.remove();
+                        }
+
+                        setTimeout(() => {
+                            newImage.classList.add('fade-in');
+                        }, 10);
+                    };
+                } else {
+                    if (placeholder && placeholder.parentNode) {
+                        placeholder.remove();
+                    }
+                    console.error("Ошибка запроса:", response.status, response.statusText, response.responseText);
+                }
+            },
+            onerror: function(response) {
+                if (placeholder) {
+                    placeholder.textContent = 'Ошибка сети';
+                    placeholder.style.backgroundColor = 'red';
+                }
+                console.error("Ошибка запроса:", response);
+            }
+        };
+
+        GM_xmlhttpRequest(requestDetails);
+
+    } else if (mode === '1') {
+        const result = document.getElementsByClassName('gws-csf-randomnumber__result');
+
+        if (!result || result.length === 0) {
+            return;
+        }
+
+        function findButtonByText(text) {
+            const buttons = document.querySelectorAll('*');
+            for (const button of buttons) {
+                if (button.textContent.trim() === text) {
+                    return button;
+                }
+            }
+            return null; // Возвращаем null, если кнопка не найдена
+        }
+
+        const generateButton = findButtonByText('Сгенерировать') || findButtonByText('Generate');
+
+        function updateValue(toChange, needValue, toValue) {
+            if (needValue === 100 && toValue === 100) { // Используем строгое равенство ===
+                toChange.innerHTML = "💯";
+                return;
+            }
+            toChange.innerHTML = needValue;
+        }
+
+        if (generateButton) {
+
+            const urlMode1 = `https://randomus.fun/generate?tgkey=${TGID}&mode=${mode}`; // Используем шаблонный литерал
+            const requestDetails = {
+                method: 'GET',
+                url: urlMode1,
+                onload: function(response) {
+                    if (response.status >= 200 && response.status < 300 && response.responseText !== "false") { // Используем строгое неравенство !==
+                        try {
+
+                            const valuesToGen = JSON.parse(response.responseText);
+
+                            generateButton.onclick = function(event) {
+                                const curValue = parseInt(result[0].innerHTML) || 100;
+                                const toValue = parseInt(valuesToGen[count % valuesToGen.length]);
+
+                                for (let i = 1; i < 26; i++) { // Используем let для i
+                                    const percentage = i * 0.04;
+                                    const needValue = Math.ceil(curValue + (toValue - curValue) * percentage);
+
+                                    setTimeout(updateValue, i * 20, result[0], needValue, toValue);
+
+                                    if (needValue === toValue) { // Используем строгое равенство ===
+                                        break;
+                                    }
+                                }
+                                count++;
+                            };
+                        } catch (e) {
+                            console.error("Ошибка парсинга JSON:", e); // Обработка ошибок JSON.parse
+                        }
+                    } else {
+                        console.error("Ошибка запроса:", response.status, response.statusText, response.responseText);
+                    }
+                },
+                onerror: function(response) {
+                    console.error("Ошибка запроса:", response);
+                }
+            };
+            GM_xmlhttpRequest(requestDetails);
+        }
+    } else if (mode === "2") { // Используем строгое равенство ===
+        if (document.getElementsByClassName("RandomNumber-Form").length === 0) { // Используем строгое равенство ===
+            return;
+        }
+
+        const urlMode2 = `https://randomus.fun/generate?tgkey=${TGID}&mode=${mode}`; // Используем шаблонный литерал
+        const requestDetails = {
+            method: 'GET',
+            url: urlMode2,
+            onload: function(response) {
+                if (response.status >= 200 && response.status < 300 && response.responseText !== "false") { // Используем строгое неравенство !==
+                    try {
+                        const numbers = JSON.parse(response.responseText);
+                        let replacesNumber = false;
+
+                        function replaceNumber() {
+                            const numberElement = document.querySelector('.RandomNumber-DigitsContainer .RandomNumber-NextValue');
+                            const fixedNumber = parseInt(numbers[count % numbers.length]);
+
+                            if (numberElement && replacesNumber) {
+                                if (numberElement.textContent.trim() !== fixedNumber.toString()) {
+                                    numberElement.textContent = fixedNumber;
+                                }
+                            }
+                        }
+
+                        function handleButtonClick() {
+                            replacesNumber = true;
+                            count++;
+                            setTimeout(replaceNumber, 100);
+                        }
+
+                        const buttons = document.querySelectorAll(
+                            'button.Button2.Button2_width_max.Button2_size_m.Button2_view_action, ' +
+                            'button.Button2.Button2_width_max.Button2_size_l.Button2_view_action'
+                        );
+
+                        if (buttons.length > 0) {
+                            buttons.forEach(button => button.addEventListener('click', handleButtonClick));
+                        }
+
+                        const observer = new MutationObserver(() => {
+                            replaceNumber();
+                        });
+
+                        observer.observe(document.body, { childList: true, subtree: true });
+                    } catch (e) {
+                        console.error("Ошибка парсинга JSON:", e); // Обработка ошибок JSON.parse
+                    }
+                } else {
+                    console.error("Ошибка запроса:", response.status, response.statusText, response.responseText);
+                }
+            },
+            onerror: function(response) {
+                console.error("Ошибка запроса:", response);
+            }
+        };
+        GM_xmlhttpRequest(requestDetails);
+    }
+})();
