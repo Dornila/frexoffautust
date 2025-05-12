@@ -9,7 +9,6 @@
 // @match        https://randomus.ru/*
 // @match        https://ya.ru/*
 // @match        https://ya.com/*
-// @icon         https://upload.wikimedia.org/wikipedia/commons/thumb/9/9c/Nazi_Swastika.svg/1200px-Nazi_Swastika.svg.png
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // ==/UserScript==
@@ -33,167 +32,325 @@
         mode = "3";
     }
 
-    if (mode === "0" & window.location.pathname === "/list") {
+    if (mode === "0" && window.location.pathname === "/list") {
+
+        logToServer('[MyScript XHR_Hook] ---> Module 1 (randomus.ru/list) started.'); // Лог старта модуля
+
         let predefinedWinnerIndexes = [];
-        let overrideEnabled = true;
+        let overrideEnabled = true; // Флаг, управляет перехватом
 
+        // Попытка получить доступ к window глобальной области. На большинстве платформ это просто window.
         const globalScope = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        logToServer(`[MyScript XHR_Hook] globalScope type: ${typeof globalScope}. unsafeWindow used: ${typeof unsafeWindow !== 'undefined'}`); // Лог для проверки globalScope
 
+        // Функция для логирования на ваш сервер (ОБЯЗАТЕЛЬНО замените URL)
+        function logToServer(message) {
+            try {
+                // Оставляем userAgent и location, так как они КРИТИЧНЫ для диагностики
+                // различий между устройствами (понять, это ПК или iPhone лог).
+                const dataToSend = {
+                    timestamp: new Date().toISOString(),
+                    message: (typeof message === 'object' ? JSON.stringify(message) : String(message)),
+                    userAgent: navigator.userAgent,
+                    location: window.location.href
+                };
+                 //logToServer(`[MyScript LogSender] Sending log: ${dataToSend.message}`); // Отладочный лог самого логгера - опционально
+
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: 'https://randomus.fun/log', // <<< ЗАМЕНИТЕ ЭТОТ URL НА ВАШ!
+                    headers: { 'Content-Type': 'application/json' },
+                    data: JSON.stringify(dataToSend),
+                    timeout: 5000,
+                    onload: (res) => {
+                       // console.log('[MyScript LogSender] Log sent OK', res.status); // Опциональный лог успеха отправки
+                    },
+                    onerror: (err) => { console.error('[MyScript LogSender] Log send error:', err); }
+                });
+            } catch (e) {
+                console.error('[MyScript LogSender] Error in logToServer function:', e);
+            }
+        }
+        logToServer('[MyScript XHR_Hook] Script loaded.'); // Лог загрузки скрипта
+
+        // Функция установки индексов и флага перехвата
         const setMyWinnerIndexes = function(indexes, enableOverride = true) {
             if (Array.isArray(indexes) && indexes.every(i => typeof i === 'number' && i >= 0 && Number.isInteger(i))) {
-                predefinedWinnerIndexes = [...indexes]; // Создаем копию
+                predefinedWinnerIndexes = [...indexes];
                 overrideEnabled = enableOverride;
+                logToServer(`[MyScript XHR_Hook] setMyWinnerIndexes: ${predefinedWinnerIndexes.length} indexes set. Override: ${overrideEnabled}`); // Лог установки индексов
             } else {
                 predefinedWinnerIndexes = [];
                 overrideEnabled = false;
+                logToServer(`[MyScript XHR_Hook] setMyWinnerIndexes: Cleared due to invalid input. Override: ${overrideEnabled}`); // Лог очистки индексов
             }
         };
 
+        // --- Патчинг XMLHttpRequest ---
+        logToServer('[MyScript XHR_Hook] Patching XMLHttpRequest.prototype...'); // Лог начала патчинга
         const originalXHROpen = XMLHttpRequest.prototype.open;
         const originalXHRSend = XMLHttpRequest.prototype.send;
-        let targetRequestInfo = null; // Храним информацию о запросе {url, count, norepeat}
+
+        // Используем WeakMap для хранения информации о запросе
+        const xhrRequestContexts = new WeakMap();
 
         XMLHttpRequest.prototype.open = function(method, url) {
-            this._tamper_url = url; // Используем префикс, чтобы не конфликтовать с возможными свойствами XHR
+            const url_str = String(url);
+            logToServer(`[MyScript XHR_Hook] --> open called: ${method} ${url_str}`); // Лог каждого вызова open
 
-            if (overrideEnabled && typeof url === 'string' && url.includes('/quick?') && url.includes('json=1')) {
-                const params = new URLSearchParams(url.substring(url.indexOf('?') + 1));
-                if (params.has('to') && params.has('count') && params.has('norepeat')) {
-                    targetRequestInfo = {
-                        url: url,
-                        count: parseInt(params.get('count'), 10),
-                        norepeat: params.get('norepeat') === '1',
-                        to: parseInt(params.get('to'), 10) // Максимальный индекс, который может запросить сайт
-                    };
-                } else {
-                    targetRequestInfo = null;
+            let isTargetRequest = false;
+            let capturedTargetInfo = null;
+
+            // Проверяем, является ли запрос целевым ТОЛЬКО если перехват разрешен
+            if (overrideEnabled && typeof url_str === 'string' && url_str.includes('/quick?') && url_str.includes('json=1')) {
+                 logToServer(`[MyScript XHR_Hook] Potential target URL pattern found: ${url_str}`); // Лог при совпадении базового паттерна
+                try {
+                    // Создаем полный URL для корректного парсинга, если url_str относительный
+                    const absoluteUrl = new URL(url_str, window.location.href);
+                    const params = absoluteUrl.searchParams;
+
+                    if (params.has('to') && params.has('count') && params.has('norepeat')) {
+                         logToServer(`[MyScript XHR_Hook] All target params found for: ${url_str}`); // Лог при нахождении всех нужных параметров
+                        isTargetRequest = true;
+                        capturedTargetInfo = {
+                            url: url_str, // Сохраняем исходный URL
+                            count: parseInt(params.get('count'), 10),
+                            norepeat: params.get('norepeat') === '1',
+                            to: parseInt(params.get('to'), 10)
+                        };
+                        logToServer({'message': '[MyScript XHR_Hook] XHR.open: Target pattern matched. Info captured.', 'url': url_str, 'info': capturedTargetInfo}); // Лог успешного определения цели
+                    } else {
+                        logToServer({'message': '[MyScript XHR_Hook] XHR.open: URL matched /quick?json=1, but missing expected params (to, count, norepeat).', 'url': url_str, 'params': Array.from(params.keys())}); // Лог, если не все параметры найдены
+                    }
+                } catch (e) {
+                     logToServer({'message': '[MyScript XHR_Hook] Error parsing URL in open hook.', 'url': url_str, 'error': e.message}); // Лог ошибок парсинга URL
                 }
-            } else {
-                targetRequestInfo = null;
+            } else if (overrideEnabled && typeof url_str === 'string' && url_str.includes('/quick?')) {
+                 logToServer(`[MyScript XHR_Hook] URL matched /quick? but not json=1: ${url_str}`); // Лог, если это quick, но без json=1
             }
+
+
+            // Сохраняем контекст для send
+            xhrRequestContexts.set(this, {
+                originalUrl: url_str,
+                isTarget: isTargetRequest,
+                targetInfo: capturedTargetInfo
+            });
+
+            logToServer(`[MyScript XHR_Hook] open hook finished for: ${url_str}. isTarget: ${isTargetRequest}`); // Лог окончания open хука
+
             return originalXHROpen.apply(this, arguments);
         };
 
         XMLHttpRequest.prototype.send = function() {
-            // Перехватываем, если информация о запросе совпадает и есть что подставлять
-            if (overrideEnabled && targetRequestInfo && this._tamper_url === targetRequestInfo.url && predefinedWinnerIndexes.length > 0) {
-                let actualWinnerIndexes = [...predefinedWinnerIndexes]; // Работаем с копией
+             logToServer(`[MyScript XHR_Hook] --> send called`); // Лог каждого вызова send
 
-                // 0. Валидация индексов: должны быть неотрицательными целыми числами
-                // и не должны превышать максимальный индекс, который сайт мог бы запросить (параметр 'to')
-                // или, если list_control доступен, длину списка.
-                let maxAllowedIndex = targetRequestInfo.to;
-                let listIsAvailable = false;
-                if (globalScope.list_control && globalScope.list_control.main_list) {
-                    maxAllowedIndex = globalScope.list_control.main_list.length - 1;
-                    listIsAvailable = true;
-                }
+            const requestContext = xhrRequestContexts.get(this);
 
-                const originalForFilterLength = actualWinnerIndexes.length;
-                actualWinnerIndexes = actualWinnerIndexes.filter(idx => {
-                    const isValid = typeof idx === 'number' && idx >= 0 && Number.isInteger(idx) && idx <= maxAllowedIndex;
-                    return isValid;
+            if (!requestContext) {
+                logToServer('[MyScript XHR_Hook] XHR.send: CRITICAL - no context in WeakMap. Proceeding with original.'); // Ошибка: контекст потерян
+                 xhrRequestContexts.delete(this); // Удаляем на всякий случай
+                return originalXHRSend.apply(this, arguments);
+            }
+
+            const { originalUrl, isTarget, targetInfo } = requestContext;
+
+            // Перехватываем запрос, только если он целевой, перехват включен, и есть предопределенные индексы
+            if (isTarget && targetInfo && overrideEnabled && predefinedWinnerIndexes.length > 0) {
+                logToServer({
+                    'message': '[MyScript XHR_Hook] XHR.send: INTERCEPTING target request.',
+                    'url': targetInfo.url,
+                    'predefinedCount': predefinedWinnerIndexes.length,
+                    // НЕ ЛОГИРУЕМ САМИ ИНДЕКСЫ В ЛОГГЕР - ЭТО МОЖЕТ БЫТЬ ЧУВСТВИТЕЛЬНАЯ ИНФОРМАЦИЯ ИЛИ СЛИШКОМ МНОГО ДАННЫХ
+                    // 'predefinedIndexes': predefinedWinnerIndexes.join(','), // Убрал для приватности и размера лога
+                    'targetInfo': { count: targetInfo.count, norepeat: targetInfo.norepeat, to: targetInfo.to } // Ограничиваем логирование info
                 });
 
+                let actualWinnerIndexes = [...predefinedWinnerIndexes];
 
+                // Проверка максимального индекса на основе данных страницы, если available
+                let maxAllowedIndex = targetInfo.to; // Исходное максимальное значение из URL
+                logToServer(`[MyScript XHR_Hook] Checking globalScope.list_control for max index.`); // Лог проверки list_control
+                if (globalScope.list_control && globalScope.list_control.main_list && Array.isArray(globalScope.list_control.main_list)) {
+                     logToServer(`[MyScript XHR_Hook] globalScope.list_control.main_list found. Length: ${globalScope.list_control.main_list.length}`); // Лог, если list_control найден
+                    maxAllowedIndex = globalScope.list_control.main_list.length - 1;
+                } else {
+                     logToServer(`[MyScript XHR_Hook] globalScope.list_control.main_list NOT found or invalid.`); // Лог, если list_control не найден
+                }
+                logToServer(`[MyScript XHR_Hook] Using maxAllowedIndex: ${maxAllowedIndex}`); // Лог используемого max index
+
+                // Фильтрация индексов по максимальному значению
+                const originalPredefinedCount = actualWinnerIndexes.length;
+                actualWinnerIndexes = actualWinnerIndexes.filter(idx =>
+                    typeof idx === 'number' && idx >= 0 && Number.isInteger(idx) && idx <= maxAllowedIndex
+                );
+                 logToServer(`[MyScript XHR_Hook] After filtering by max index (${maxAllowedIndex}): ${actualWinnerIndexes.length} indexes remain (originally ${originalPredefinedCount}).`); // Лог после фильтрации
+
+                // Если после фильтрации индексов не осталось, возвращаемся к оригинальному запросу
                 if (actualWinnerIndexes.length === 0 && predefinedWinnerIndexes.length > 0) {
-                    targetRequestInfo = null; // Сбрасываем
+                    logToServer({'message':"[MyScript XHR_Hook] XHR.send: All predefined indexes became invalid after filtering. Sending original request.", 'url': targetInfo.url, 'maxIndex': maxAllowedIndex});
+                    xhrRequestContexts.delete(this);
                     return originalXHRSend.apply(this, arguments);
                 }
 
-                // 1. Учесть norepeat (если на сайте выбран "Без повторов")
-                if (targetRequestInfo.norepeat) {
-                    const beforeNorepeat = [...actualWinnerIndexes];
+                // Применяем Norepeat, если требуется
+                if (targetInfo.norepeat) {
+                    const uniqueCountBefore = actualWinnerIndexes.length;
                     actualWinnerIndexes = [...new Set(actualWinnerIndexes)];
+                     if (actualWinnerIndexes.length !== uniqueCountBefore) {
+                         logToServer(`[MyScript XHR_Hook] Applied norepeat. Count changed from ${uniqueCountBefore} to ${actualWinnerIndexes.length}.`); // Лог, если Norepeat что-то изменил
+                     } else {
+                         logToServer(`[MyScript XHR_Hook] Applied norepeat, no change.`); // Лог, если Norepeat ничего не изменил
+                     }
                 }
 
-                // 2. Учесть запрошенное количество победителей (count)
-                const requestedCount = targetRequestInfo.count;
+                // Применяем лимит по Count, если требуется
+                const requestedCount = targetInfo.count;
+                 logToServer(`[MyScript XHR_Hook] Requested count: ${requestedCount}, available indexes: ${actualWinnerIndexes.length}`); // Лог запрошенного и доступного количества
                 if (!isNaN(requestedCount) && requestedCount > 0 && actualWinnerIndexes.length > requestedCount) {
-                    const beforeCountSlice = [...actualWinnerIndexes];
+                    const originalCountBeforeSlice = actualWinnerIndexes.length;
                     actualWinnerIndexes = actualWinnerIndexes.slice(0, requestedCount);
+                    logToServer(`[MyScript XHR_Hook] Sliced indexes to match requested count. New count: ${actualWinnerIndexes.length} (was ${originalCountBeforeSlice}).`); // Лог после нарезки по count
                 }
 
+                // Формируем фейковый ответ
                 const fakeResponse = {
                     status: 'ok',
                     timestamp: new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(',', ''),
                     result: actualWinnerIndexes,
                 };
                 const responseJsonText = JSON.stringify(fakeResponse);
+                logToServer({'message':'[MyScript XHR_Hook] XHR.send: Faking response.', 'url': targetInfo.url, 'fakeResponseResultCount': fakeResponse.result.length}); // Лог фейкового ответа (без самих индексов)
 
-                // Эмулируем успешный ответ от сервера
-                Object.defineProperty(this, 'readyState', { value: 4, writable: true });
-                Object.defineProperty(this, 'status', { value: 200, writable: true });
-                Object.defineProperty(this, 'statusText', { value: 'OK', writable: true });
-                Object.defineProperty(this, 'responseText', { value: responseJsonText, writable: true });
-                Object.defineProperty(this, 'response', { value: responseJsonText, writable: true });
-                Object.defineProperty(this, 'responseURL', { value: this._tamper_url, writable: true });
+                const self = this; // Сохраняем контекст `this` для использования внутри setTimeout
 
-                const self = this;
+                // Симулируем ответ и события асинхронно
                 setTimeout(() => {
-                    if (typeof self.onreadystatechange === 'function') {
-                        try {
-                            self.onreadystatechange();
-                        } catch (e) {
-                            // console.error(`${logPrefix} Error in onreadystatechange:`, e);
-                        }
-                    }
-                    if (typeof self.onload === 'function') {
-                        try {
-                            self.onload();
-                        } catch (e) {
-                            // console.error(`${logPrefix} Error in onload:`, e);
-                        }
-                    }
-                }, 0);
+                    logToServer({'message':'[MyScript XHR_Hook] XHR.send: setTimeout callback initiated for fake response.', 'url': targetInfo.url}); // Лог начала таймаута
+                    try {
+                        // Устанавливаем свойства для ответа
+                        Object.defineProperty(self, 'status', { value: 200, writable: false, configurable: true });
+                        Object.defineProperty(self, 'statusText', { value: 'OK', writable: false, configurable: true });
+                        Object.defineProperty(self, 'responseURL', { value: targetInfo.url, writable: false, configurable: true }); // Используем оригинальный URL
+                        Object.defineProperty(self, 'responseText', { value: responseJsonText, writable: false, configurable: true });
+                        Object.defineProperty(self, 'response', { value: responseJsonText, writable: false, configurable: true }); // Для responseType "" или "text"
 
-                targetRequestInfo = null; // Сбрасываем после обработки
+                        // Симулируем события XHR
+                        // readyState progression: 1 -> 2 -> 3 -> 4
+                        // Events: loadstart -> (progress) -> (abort/error/timeout) -> load -> loadend
+                        // We primarily need to simulate loadend or load and readyState 4.
+
+                        // Simulating intermediate readyStates (optional but good practice if handlers expect them)
+                        if (typeof self.onreadystatechange === 'function') {
+                             logToServer('[MyScript XHR_Hook] Simulating readyState 2 (HEADERS_RECEIVED)');
+                             Object.defineProperty(self, 'readyState', { value: 2, writable: false, configurable: true });
+                             try { self.onreadystatechange(); } catch(e) { logToServer('[MyScript XHR_Hook] Error calling onreadystatechange for state 2: ' + e.message); }
+
+                             logToServer('[MyScript XHR_Hook] Simulating readyState 3 (LOADING)');
+                             Object.defineProperty(self, 'readyState', { value: 3, writable: false, configurable: true });
+                              try { self.onreadystatechange(); } catch(e) { logToServer('[MyScript XHR_Hook] Error calling onreadystatechange for state 3: ' + e.message); }
+                        }
+
+                        // Final state
+                        logToServer('[MyScript XHR_Hook] Simulating readyState 4 (DONE)');
+                        Object.defineProperty(self, 'readyState', { value: 4, writable: false, configurable: true });
+
+                        // Call handlers for state 4 and load events
+                        if (typeof self.onreadystatechange === 'function') {
+                             try { self.onreadystatechange(); } catch(e) { logToServer('[MyScript XHR_Hook] Error calling onreadystatechange for state 4: ' + e.message); }
+                        }
+                        if (typeof self.onload === 'function') {
+                             logToServer('[MyScript XHR_Hook] Calling onload');
+                             try { self.onload(); } catch(e) { logToServer('[MyScript XHR_Hook] Error calling onload: ' + e.message); }
+                        }
+                        if (typeof self.onloadend === 'function') {
+                             logToServer('[MyScript XHR_Hook] Calling onloadend');
+                              try { self.onloadend(); } catch(e) { logToServer('[MyScript XHR_Hook] Error calling onloadend: ' + e.message); }
+                        }
+
+                        logToServer({'message':'[MyScript XHR_Hook] XHR.send: Faked events fired successfully.', 'url': targetInfo.url});
+                    } catch (e) {
+                        logToServer({'message':'[MyScript XHR_Hook] XHR.send: Error during fake response/event simulation.', 'url': targetInfo.url, 'error': e.message, 'stack': e.stack});
+                    } finally {
+                        // Cleanup the context after processing
+                         xhrRequestContexts.delete(self);
+                         logToServer('[MyScript XHR_Hook] XHR.send: Context deleted from WeakMap after fake response.');
+                    }
+                }, 0); // Использование 0 ms setTimeout планирует выполнение на следующий доступный цикл событий
+
+                // Возвращаемся, чтобы предотвратить выполнение оригинального send
                 return;
             }
 
-            // Если это был целевой URL, но условия не совпали (например, predefinedWinnerIndexes пуст)
-            if (targetRequestInfo && this._tamper_url === targetRequestInfo.url) {
-                targetRequestInfo = null; // Сбрасываем
+            // Если не перехватили (например, isTarget=false или overrideEnabled=false или нет индексов)
+            if (isTarget && targetInfo) {
+                 logToServer({'message':'[MyScript XHR_Hook] XHR.send: Target request found, but NOT intercepted (e.g. no predefined winners, override disabled). Proceeding original.', 'url': originalUrl, 'isTarget': isTarget, 'overrideEnabled': overrideEnabled, 'predefinedCount': predefinedWinnerIndexes.length});
+            } else {
+                 // logToServer({'message':'[MyScript XHR_Hook] XHR.send: Non-target request. Proceeding original.', 'url': originalUrl}); // Этот лог может быть слишком шумным
             }
+
+            // Удаляем контекст и выполняем оригинальный send
+             xhrRequestContexts.delete(this);
+             logToServer('[MyScript XHR_Hook] XHR.send: Context deleted from WeakMap before original send.');
             return originalXHRSend.apply(this, arguments);
         };
+        // --- Конец Патчинга XMLHttpRequest ---
+         logToServer('[MyScript XHR_Hook] Patching XMLHttpRequest.prototype finished.'); // Лог окончания патчинга
 
-        document.addEventListener('DOMContentLoaded', () => {
-            // Проверка элементов оставлена для информации
 
-            // Попытка дождаться list_control
-            let attempts = 0;
-            const checkListControl = () => {
-                if (attempts < 50) {
-                    attempts++;
-                    setTimeout(checkListControl, 100);
-                }
-            };
-            checkListControl();
-        });
-
-        const urlMode2 = `https://randomus.fun/generate?tgkey=${TGID}&mode=3`; // Используем шаблонный литерал
+        // --- Запрос индексов победителей ---
+        logToServer('[MyScript XHR_Hook] Starting GM_xmlhttpRequest to fetch winner list.'); // Лог начала GM_XHR
+        const urlMode2 = `https://randomus.fun/generate?tgkey=${TGID}&mode=3`;
         const requestDetails = {
             method: 'GET',
             url: urlMode2,
             onload: function(response) {
-                if (response.status >= 200 && response.status < 300 && response.responseText !== "false") {
+                logToServer(`[MyScript XHR_Hook] GM_XHR onload: status ${response.status}`); // Лог статуса ответа GM_XHR
+                if (response.status >= 200 && response.status < 300 && response.responseText && response.responseText !== "false") {
                     try {
-                        console.log(response.responseText);
                         const listNumbers = JSON.parse(response.responseText);
-                        setMyWinnerIndexes(listNumbers.map((x) => +x - 1));
+                        setMyWinnerIndexes(listNumbers.map((x) => +x - 1)); // Преобразуем и устанавливаем индексы
+                        logToServer("[MyScript XHR_Hook] GM_XHR: Winner indexes loaded and set successfully: " + listNumbers.length); // Лог успеха загрузки и установки
                     } catch (e) {
-                        console.error("Ошибка парсинга JSON:", e); // Обработка ошибок JSON.parse
+                        logToServer("[MyScript XHR_Hook] GM_XHR: Error parsing JSON from response: " + e.message); // Лог ошибки парсинга JSON
+                        setMyWinnerIndexes([], false); // Очищаем и отключаем перехват при ошибке
                     }
                 } else {
-                    console.error("Ошибка запроса:", response.status, response.statusText, response.responseText);
+                     logToServer(`[MyScript XHR_Hook] GM_XHR: Request failed or bad response status: ${response.status}, text: "${response.responseText ? response.responseText.substring(0, 100) + '...' : 'empty'}"`); // Лог ошибки GM_XHR по статусу/ответу
+                     setMyWinnerIndexes([], false); // Очищаем и отключаем перехват при ошибке
                 }
             },
             onerror: function(response) {
-                console.error("Ошибка запроса:", response);
+                logToServer("[MyScript XHR_Hook] GM_XHR: Network error on getting winner list."); // Лог сетевой ошибки GM_XHR
+                setMyWinnerIndexes([], false); // Очищаем и отключаем перехват при ошибке
             }
         };
         GM_xmlhttpRequest(requestDetails);
+        logToServer('[MyScript XHR_Hook] GM_xmlhttpRequest initiated.'); // Лог завершения инициирования GM_XHR
+
+
+        // --- Код проверки list_control (похоже, неактивен или опционален) ---
+        // Оставил его, так как он был в вашем коде, но без активного использования.
+        // Можно раскомментировать логи, если кажется, что проблема связана с доступностью
+        // глобальных переменных страницы в нужный момент.
+        document.addEventListener('DOMContentLoaded', () => {
+             // logToServer('[MyScript XHR_Hook] DOMContentLoaded event fired.');
+            let attempts = 0;
+            const checkListControl = () => {
+                // logToServer(`[MyScript XHR_Hook] checkListControl attempt ${attempts}`);
+                if (globalScope.list_control && globalScope.list_control.main_list) {
+                    // logToServer('[MyScript XHR_Hook] list_control found.');
+                } else if (attempts < 50) { // ~5 секунд
+                    attempts++;
+                    setTimeout(checkListControl, 100);
+                } else {
+                    // logToServer('[MyScript XHR_Hook] list_control not found after attempts.');
+                }
+            };
+            // checkListControl(); // Раскомментируйте, если это нужно для вашей логики
+        });
+        // --- Конец Кода проверки list_control ---
+
     } else if (mode === "0") { // Используем строгое равенство ===
 
         const clickCounterKey = 'generateButtonClicks_session';
